@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#581c87">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Options Manager</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { 
+            margin: 0; 
+            padding: 0; 
+            font-family: system-ui, -apple-system, sans-serif;
+            overscroll-behavior: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="app"></div>
+
+```
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script type="text/babel">
+    const { useState, useEffect } = React;
+
+    function OptionsManager() {
+        const [position, setPosition] = useState({
+            ticker: '', type: 'call', strike: '', expiration: '', entryPremium: '',
+            currentPremium: '', contracts: '', entryTime: null
+        });
+        
+        const [analysis, setAnalysis] = useState(null);
+        const [history, setHistory] = useState([]);
+        const [stats, setStats] = useState({ wins: 0, losses: 0, total: 0 });
+        const [time, setTime] = useState('0:00');
+        const [daysToExp, setDaysToExp] = useState(null);
+
+        useEffect(() => {
+            const saved = localStorage.getItem('optionsTrades');
+            if (saved) {
+                try {
+                    const h = JSON.parse(saved);
+                    setHistory(h);
+                    let w = 0, l = 0, t = 0;
+                    h.forEach(x => { const p = parseFloat(x.pl); t += p; if (p > 0) w++; else if (p < 0) l++; });
+                    setStats({ wins: w, losses: l, total: t });
+                } catch (e) {}
+            }
+        }, []);
+
+        useEffect(() => {
+            if (position.entryTime) {
+                const iv = setInterval(() => {
+                    const e = Date.now() - position.entryTime;
+                    const m = Math.floor(e / 60000);
+                    setTime(`${Math.floor(m / 60)}:${(m % 60).toString().padStart(2, '0')}`);
+                }, 1000);
+                return () => clearInterval(iv);
+            }
+        }, [position.entryTime]);
+
+        useEffect(() => {
+            if (position.expiration) {
+                const exp = new Date(position.expiration);
+                const now = new Date();
+                const diff = Math.ceil((exp - now) / (1000 * 60 * 60 * 24));
+                setDaysToExp(diff);
+            }
+        }, [position.expiration]);
+
+        const analyze = () => {
+            const entry = parseFloat(position.entryPremium);
+            const current = parseFloat(position.currentPremium);
+            const contracts = parseFloat(position.contracts);
+            
+            if (!entry || !current || !contracts) {
+                alert('Fill: Entry Premium, Current Premium, and Contracts');
+                return;
+            }
+
+            const costBasis = entry * contracts * 100;
+            const currentValue = current * contracts * 100;
+            const pl = currentValue - costBasis;
+            const pct = ((current - entry) / entry) * 100;
+
+            let thetaWarning = null;
+            if (daysToExp !== null) {
+                if (daysToExp <= 3) thetaWarning = 'CRITICAL - Heavy theta decay!';
+                else if (daysToExp <= 7) thetaWarning = 'HIGH - Theta accelerating';
+                else if (daysToExp <= 14) thetaWarning = 'MODERATE - Monitor theta';
+            }
+
+            const decision = makeDecision(pct, daysToExp);
+
+            setAnalysis({ costBasis, currentValue, pl, pct, thetaWarning, decision, breakEven: entry, maxLoss: costBasis });
+            if (!position.entryTime) setPosition(p => ({ ...p, entryTime: Date.now() }));
+        };
+
+        const makeDecision = (pct, days) => {
+            let act = '', conf = '', why = [], rule = [];
+
+            if (days !== null && days <= 2) {
+                act = 'EXIT NOW - EXPIRATION RISK'; conf = 'CRITICAL';
+                why.push(`Only ${days} days to expiration`);
+                why.push('Theta decay accelerating rapidly');
+                rule.push('✓ Exit 1-2 days before expiration');
+            } else if (pct <= -80) {
+                act = 'EXIT NOW - MAJOR LOSS'; conf = 'CRITICAL';
+                why.push(`Down ${Math.abs(pct).toFixed(0)}% - cut losses`);
+                rule.push('✓ Exit at 80% loss');
+            } else if (pct >= 100) {
+                act = 'TAKE PROFIT - DOUBLED'; conf = 'HIGH';
+                why.push(`${pct.toFixed(0)}% gain - doubled your money!`);
+                rule.push('✓ Take profit at 100%');
+            } else if (pct >= 50) {
+                act = 'SCALE OUT 50%'; conf = 'HIGH';
+                why.push(`${pct.toFixed(0)}% gain - excellent return`);
+                rule.push('✓ Take profit at 50%+');
+            } else if (pct >= 25) {
+                act = 'CONSIDER SCALING'; conf = 'MEDIUM';
+                why.push(`${pct.toFixed(0)}% gain - solid return`);
+                rule.push('✓ Scale at 25%+');
+            } else if (days !== null && days <= 7 && pct > 0) {
+                act = 'TAKE PROFIT - TIME RISK'; conf = 'HIGH';
+                why.push(`${days} days left with ${pct.toFixed(0)}% profit`);
+                rule.push('✓ Exit profitable <7 days to exp');
+            } else if (pct < 0 && pct > -50 && days > 14) {
+                act = 'HOLD - TIME REMAINING'; conf = 'MEDIUM';
+                why.push(`Down ${Math.abs(pct).toFixed(0)}% but ${days} days left`);
+                rule.push('✓ Hold with time remaining');
+            } else if (pct <= -50) {
+                act = 'EXIT - CUT LOSSES'; conf = 'HIGH';
+                why.push(`Down ${Math.abs(pct).toFixed(0)}%`);
+                rule.push('✓ Exit at 50% loss');
+            } else {
+                act = 'HOLD & MONITOR'; conf = 'LOW';
+                why.push('Monitor for profit targets');
+                rule.push('✓ Continue monitoring');
+            }
+
+            return { act, conf, why, rule };
+        };
+
+        const save = () => {
+            if (!analysis) return;
+            const t = {
+                id: Date.now(), time: new Date().toLocaleString(), ticker: position.ticker,
+                type: position.type, strike: position.strike, entry: position.entryPremium,
+                exit: position.currentPremium, contracts: position.contracts,
+                pl: analysis.pl.toFixed(2), pct: analysis.pct.toFixed(0)
+            };
+            const h = [t, ...history].slice(0, 50);
+            setHistory(h);
+            localStorage.setItem('optionsTrades', JSON.stringify(h));
+            let w = 0, l = 0, tot = 0;
+            h.forEach(x => { const p = parseFloat(x.pl); tot += p; if (p > 0) w++; else if (p < 0) l++; });
+            setStats({ wins: w, losses: l, total: tot });
+            alert('Saved!');
+        };
+
+        const reset = () => {
+            if (confirm('Start new trade?')) {
+                setPosition({ ticker: '', type: 'call', strike: '', expiration: '', entryPremium: '', currentPremium: '', contracts: '', entryTime: null });
+                setAnalysis(null); setTime('0:00'); setDaysToExp(null);
+            }
+        };
+
+        const color = (a) => {
+            if (a.includes('EXIT') || a.includes('LOSS')) return 'bg-red-500';
+            if (a.includes('PROFIT') || a.includes('DOUBLED')) return 'bg-green-500';
+            if (a.includes('SCALE')) return 'bg-yellow-500';
+            return 'bg-blue-500';
+        };
+
+        return (
+            <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 p-4">
+                <div className="max-w-4xl mx-auto">
+                    <div className="text-center mb-6">
+                        <h1 className="text-3xl font-bold text-white mb-2">Options Manager</h1>
+                        <p className="text-gray-300 text-sm">Know when to take profit or cut losses</p>
+                    </div>
+
+                    {history.length > 0 && (
+                        <div className="bg-white/10 rounded-xl p-4 mb-4 border border-white/20">
+                            <div className="grid grid-cols-3 gap-4 text-center text-sm">
+                                <div>
+                                    <p className="text-gray-400 text-xs">Win Rate</p>
+                                    <p className="text-white font-bold">
+                                        {stats.wins + stats.losses > 0 ? ((stats.wins / (stats.wins + stats.losses)) * 100).toFixed(0) : 0}%
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-gray-400 text-xs">Total P&L</p>
+                                    <p className={`font-bold ${stats.total >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                        {stats.total >= 0 ? '+' : ''}${stats.total.toFixed(2)}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-gray-400 text-xs">Trades</p>
+                                    <p className="text-white font-bold">{history.length}</p>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="bg-white/10 rounded-xl p-4 mb-4 border border-white/20">
+                        <div className="flex justify-between mb-4">
+                            <h2 className="text-lg font-semibold text-white">Position</h2>
+                            {analysis && (
+                                <div className="flex gap-2">
+                                    <button onClick={analyze} className="bg-blue-500 text-white px-3 py-1 rounded text-sm">Refresh</button>
+                                    <button onClick={save} className="bg-green-500 text-white px-3 py-1 rounded text-sm">Save</button>
+                                    <button onClick={reset} className="bg-gray-500 text-white px-3 py-1 rounded text-sm">New</button>
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="space-y-3">
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-xs text-gray-300 mb-1">Ticker *</label>
+                                    <input type="text" value={position.ticker}
+                                        onChange={(e) => setPosition({...position, ticker: e.target.value.toUpperCase()})}
+                                        className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white text-sm uppercase"
+                                        placeholder="WULF" />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-gray-300 mb-1">Type *</label>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <button onClick={() => setPosition({...position, type: 'call'})}
+                                            className={`p-2 rounded border text-xs ${position.type === 'call' ? 'bg-green-500/30 border-green-500 text-white' : 'bg-white/5 border-white/20 text-gray-300'}`}>
+                                            CALL
+                                        </button>
+                                        <button onClick={() => setPosition({...position, type: 'put'})}
+                                            className={`p-2 rounded border text-xs ${position.type === 'put' ? 'bg-red-500/30 border-red-500 text-white' : 'bg-white/5 border-white/20 text-gray-300'}`}>
+                                            PUT
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-xs text-gray-300 mb-1">Strike *</label>
+                                    <input type="number" step="0.01" value={position.strike}
+                                        onChange={(e) => setPosition({...position, strike: e.target.value})}
+                                        className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white text-sm"
+                                        placeholder="30.00" />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-gray-300 mb-1">Expiration *</label>
+                                    <input type="date" value={position.expiration}
+                                        onChange={(e) => setPosition({...position, expiration: e.target.value})}
+                                        className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white text-sm" />
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-3 gap-3">
+                                <div>
+                                    <label className="block text-xs text-gray-300 mb-1">Entry $ *</label>
+                                    <input type="number" step="0.01" value={position.entryPremium}
+                                        onChange={(e) => setPosition({...position, entryPremium: e.target.value})}
+                                        className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white text-sm"
+                                        placeholder="0.50" />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-gray-300 mb-1">Current $ *</label>
+                                    <input type="number" step="0.01" value={position.currentPremium}
+                                        onChange={(e) => setPosition({...position, currentPremium: e.target.value})}
+                                        className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white text-sm"
+                                        placeholder="0.75" />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-gray-300 mb-1">Contracts *</label>
+                                    <input type="number" value={position.contracts}
+                                        onChange={(e) => setPosition({...position, contracts: e.target.value})}
+                                        className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white text-sm"
+                                        placeholder="10" />
+                                </div>
+                            </div>
+
+                            {daysToExp !== null && (
+                                <div className={`rounded p-2 border text-sm ${
+                                    daysToExp <= 3 ? 'bg-red-500/20 border-red-500 text-red-200' :
+                                    daysToExp <= 7 ? 'bg-yellow-500/20 border-yellow-500 text-yellow-200' :
+                                    'bg-blue-500/20 border-blue-500 text-blue-200'
+                                }`}>
+                                    {daysToExp} days to expiration
+                                    {daysToExp <= 3 && ' - URGENT!'}
+                                </div>
+                            )}
+
+                            {!analysis && (
+                                <button onClick={analyze}
+                                    className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white font-semibold px-6 py-3 rounded">
+                                    Analyze Position
+                                </button>
+                            )}
+                        </div>
+                    </div>
+
+                    {analysis && (
+                        <div className="space-y-4">
+                            <div className={`${color(analysis.decision.act)}/20 rounded-xl p-4 border-2 ${color(analysis.decision.act).replace('bg-', 'border-')}`}>
+                                <div className="flex justify-between mb-3">
+                                    <div>
+                                        <h3 className="text-xl font-bold text-white">{analysis.decision.act}</h3>
+                                        <p className="text-gray-300 text-xs">Confidence: {analysis.decision.conf}</p>
+                                    </div>
+                                    <div className="text-right">
+                                        <p className={`text-2xl font-bold ${analysis.pl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                            {analysis.pl >= 0 ? '+' : ''}${analysis.pl.toFixed(2)}
+                                        </p>
+                                        <p className={`text-sm ${analysis.pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                            ({analysis.pct >= 0 ? '+' : ''}{analysis.pct.toFixed(0)}%)
+                                        </p>
+                                    </div>
+                                </div>
+
+                                {analysis.thetaWarning && (
+                                    <div className="bg-red-500/30 border border-red-500 rounded p-2 mb-3 text-red-100 text-xs font-semibold">
+                                        ⚠️ {analysis.thetaWarning}
+                                    </div>
+                                )}
+
+                                <div className="space-y-2">
+                                    <div>
+                                        <h4 className="text-white font-semibold text-sm mb-1">Why:</h4>
+                                        <ul className="space-y-1">
+                                            {analysis.decision.why.map((w, i) => (
+                                                <li key={i} className="text-gray-200 text-xs flex gap-2">
+                                                    <span>•</span><span>{w}</span>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    </div>
+                                    <div className="pt-2 border-t border-white/20">
+                                        <h4 className="text-white font-semibold text-sm mb-1">Rules:</h4>
+                                        <ul className="space-y-1">
+                                            {analysis.decision.rule.map((r, i) => (
+                                                <li key={i} className="text-green-300 text-xs">{r}</li>
+                                            ))}
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                                <div className="bg-white/10 rounded-xl p-4 border border-white/20">
+                                    <h3 className="text-sm font-semibold text-white mb-3">Position</h3>
+                                    <div className="space-y-2 text-xs">
+                                        <div className="flex justify-between">
+                                            <span className="text-gray-300">Cost:</span>
+                                            <span className="text-white font-bold">${analysis.costBasis.toFixed(2)}</span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                            <span className="text-gray-300">Value:</span>
+                                            <span className="text-white font-bold">${analysis.currentValue.toFixed(2)}</span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                            <span className="text-gray-300">Max Loss:</span>
+                                            <span className="text-red-400 font-bold">${analysis.maxLoss.toFixed(2)}</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="bg-white/10 rounded-xl p-4 border border-white/20">
+                                    <h3 className="text-sm font-semibold text-white mb-3">Targets</h3>
+                                    <div className="space-y-2 text-xs">
+                                        <div className="flex justify-between">
+                                            <span className="text-gray-300">50% Profit:</span>
+                                            <span className="text-green-400">${(parseFloat(position.entryPremium) * 1.5).toFixed(2)}</span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                            <span className="text-gray-300">100% Profit:</span>
+                                            <span className="text-green-400">${(parseFloat(position.entryPremium) * 2).toFixed(2)}</span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                            <span className="text-gray-300">50% Loss:</span>
+                                            <span className="text-red-400">${(parseFloat(position.entryPremium) * 0.5).toFixed(2)}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {history.length > 0 && (
+                                <div className="bg-white/10 rounded-xl p-4 border border-white/20">
+                                    <h3 className="text-sm font-semibold text-white mb-3">Recent</h3>
+                                    <div className="space-y-2">
+                                        {history.slice(0, 3).map(t => (
+                                            <div key={t.id} className="bg-white/5 rounded p-2 text-xs flex justify-between">
+                                                <div>
+                                                    <span className="text-white font-bold">{t.ticker}</span>
+                                                    <span className={`ml-2 px-2 py-0.5 rounded ${t.type === 'call' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
+                                                        {t.type.toUpperCase()}
+                                                    </span>
+                                                </div>
+                                                <div className="text-right">
+                                                    <p className={parseFloat(t.pl) >= 0 ? 'text-green-400 font-bold' : 'text-red-400 font-bold'}>
+                                                        {parseFloat(t.pl) >= 0 ? '+' : ''}${t.pl}
+                                                    </p>
+                                                    <p className="text-gray-400">({t.pct}%)</p>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    <div className="mt-6 bg-yellow-500/20 border border-yellow-500/50 rounded-lg p-4">
+                        <h3 className="text-yellow-300 font-semibold mb-2 text-sm">💡 Tips:</h3>
+                        <ul className="text-yellow-100 text-xs space-y-1">
+                            <li>• Take profit at 50-100% - options move fast!</li>
+                            <li>• Cut losses at 50-80% - don't go to zero</li>
+                            <li>• Exit 1-2 days before expiration</li>
+                            <li>• Update current premium every 15-30 min</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('app'));
+    root.render(<OptionsManager />);
+</script>
+```
+
+</body>
+</html>
